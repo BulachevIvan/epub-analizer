@@ -18,12 +18,60 @@ class ChapterSplitResult:
 
 class ChapterSplitter:
     def __init__(self):
-        # Регулярное выражение для поиска заголовков глав
-        self.chapter_pattern = re.compile(
-            r'(?:^|\n)(?:Глава|Книга|Часть|Пролог|Эпилог)[\s\d]+[–-]?\s*([^\n]+)',
-            re.IGNORECASE | re.MULTILINE
-        )
+        # Регулярные выражения для поиска заголовков глав в разных форматах
+        self.chapter_patterns = [
+            # HTML формат
+            re.compile(r'<h[1-6][^>]*>.*?</h[1-6]>', re.DOTALL),
+            # Текстовый формат с номерами глав
+            re.compile(r'(?:^|\n)(?:Глава|Книга|Часть|Пролог|Эпилог)[\s\d]+[–-]?\s*([^\n]+)', re.IGNORECASE | re.MULTILINE),
+            # Текстовый формат с римскими цифрами
+            re.compile(r'(?:^|\n)(?:Глава|Книга|Часть|Пролог|Эпилог)[\s]*[IVX]+[–-]?\s*([^\n]+)', re.IGNORECASE | re.MULTILINE)
+        ]
         
+        self.chapter_title_patterns = [
+            # HTML формат
+            re.compile(r'<h[1-6][^>]*>(.*?)</h[1-6]>', re.DOTALL),
+            # Текстовый формат
+            re.compile(r'(?:Глава|Книга|Часть|Пролог|Эпилог)[\s\d]+[–-]?\s*([^\n]+)', re.IGNORECASE),
+            # Текстовый формат с римскими цифрами
+            re.compile(r'(?:Глава|Книга|Часть|Пролог|Эпилог)[\s]*[IVX]+[–-]?\s*([^\n]+)', re.IGNORECASE)
+        ]
+
+    def split_text_into_chapters(self, text: str) -> Dict[int, str]:
+        """Разбивает текст на главы и возвращает словарь {номер_главы: текст_главы}"""
+        try:
+            # Пробуем разные паттерны для поиска глав
+            chapter_matches = []
+            used_pattern = None
+            
+            for pattern in self.chapter_patterns:
+                matches = list(pattern.finditer(text))
+                if matches:
+                    chapter_matches = matches
+                    used_pattern = pattern
+                    break
+            
+            if not chapter_matches:
+                print("Не найдены заголовки глав ни в одном из поддерживаемых форматов")
+                return {}
+            
+            chapters = {}
+            # Разбиваем текст на главы
+            for i in range(len(chapter_matches)):
+                start = chapter_matches[i].start()
+                # Если это последняя глава, берем до конца текста
+                end = chapter_matches[i + 1].start() if i + 1 < len(chapter_matches) else len(text)
+                
+                chapter_text = text[start:end]
+                # Извлекаем номер главы из заголовка
+                chapter_num = i + 1  # Нумерация глав с 1
+                chapters[chapter_num] = chapter_text
+            
+            return chapters
+        except Exception as e:
+            print(f"Ошибка при разбиении текста на главы: {str(e)}")
+            return {}
+
     def split_chapters(self, epub_path: str, output_dir: str = None) -> ChapterSplitResult:
         """Разделяет EPUB файл на главы и сохраняет их в ZIP архив"""
         result = ChapterSplitResult()
