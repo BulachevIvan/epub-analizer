@@ -1,0 +1,5 @@
+beautifulsoup4==4.12.2
+lxml==4.9.3
+Pillow==10.0.0
+ebooklib>=0.18
+aiofiles==23.2.1 
