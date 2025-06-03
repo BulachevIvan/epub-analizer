@@ -3,4 +3,5 @@ lxml==4.9.3
 Pillow==10.0.0
 ebooklib>=0.18
 aiofiles==23.2.1
-googletrans==4.0.0-rc1 
+googletrans==4.0.0-rc1
+pytest 

@@ -32,10 +32,6 @@ from text_formatter import TextFormatter, FormattingResult
 from chapter_splitter import ChapterSplitter, ChapterSplitResult
 from style_processor import StyleProcessor, StyleProcessingResult
 from image_transformer import apply_pixelate, apply_contrast, apply_mirror, apply_grayscale
-from googletrans import Translator
-from library import save_to_library
-from translation import translate_first_chapter
-from processing_tasks import process_chapters_parallel, process_metadata_parallel
 
 @dataclass
 class ProcessingResult:
@@ -48,7 +44,6 @@ class ProcessingResult:
     chapters: ChapterSplitResult = None
     style_processing: StyleProcessingResult = None
     library_save_path: Optional[str] = None
-    translated_first_chapter: Optional[str] = None
     execution_times: Dict[str, float] = None
     thread_statuses: Dict[str, str] = None
 
@@ -102,8 +97,6 @@ class KeywordSearchResult:
 class TocResult:
     toc_text: str = ""
     toc_html: str = ""
-    chapters: List[Dict[str, str]] = field(default_factory=list)
-    total_chapters: int = 0
 
 @dataclass
 class FormattingResult:
@@ -135,8 +128,6 @@ class EpubProcessor:
         self.search_pattern = search_pattern
         self.library_dir = library_dir
         self.result = ProcessingResult()
-        self.epub_archive: Optional[zipfile.ZipFile] = None
-        self.opf_dir: str = ""
         self.metadata_extractor = MetadataExtractor(epub_path)
         self.text_extractor = TextExtractor()
         self.text_analyzer = TextAnalyzer()
@@ -148,37 +139,6 @@ class EpubProcessor:
         self.style_processor = StyleProcessor(epub_path)
         
         os.makedirs(self.library_dir, exist_ok=True)
-
-    def __enter__(self):
-        """Открывает EPUB файл при входе в контекст."""
-        try:
-            self.epub_archive = zipfile.ZipFile(self.epub_path, 'r')
-            
-            # Находим путь к OPF файлу и определяем его директорию
-            container = self.epub_archive.read('META-INF/container.xml')
-            root = ET.fromstring(container)
-            opf_path = root.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile').get('full-path')
-            self.opf_dir = os.path.dirname(opf_path) # Сохраняем директорию OPF
-            if self.opf_dir and self.opf_dir != '.':
-                self.opf_dir += '/' # Добавляем слеш, если директория не корень
-            else:
-                self.opf_dir = "" # Если OPF в корне, директория пуста
-            
-            return self
-        except zipfile.BadZipFile:
-            print(f"Ошибка: файл '{self.epub_path}' не является корректным ZIP файлом (EPUB).")
-            raise
-        except FileNotFoundError:
-            print(f"Ошибка: файл '{self.epub_path}' не найден.")
-            raise
-        except Exception as e:
-            print(f"Ошибка при открытии EPUB файла: {str(e)}")
-            raise
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Закрывает EPUB файл при выходе из контекста."""
-        if self.epub_archive:
-            self.epub_archive.close()
 
     def extract_metadata(self) -> EpubMetadata:
         """Извлекает метаданные из EPUB файла"""
@@ -322,86 +282,147 @@ class EpubProcessor:
             self.result.thread_statuses['process_styles'] = f"Ошибка: {str(e)}"
             raise
 
+    def process_chapters_parallel(self, text_result: TextExtractionResult) -> Dict[str, str]:
+        """Параллельная обработка глав"""
+        try:
+            # Разбиваем текст на главы
+            chapters = self.chapter_splitter.split_text_into_chapters(text_result.text)
+            
+            if not chapters:
+                print("Не удалось разбить текст на главы")
+                return {}
+            
+            # Используем минимум между количеством глав и доступными ядрами
+            max_workers = min(len(chapters), os.cpu_count() or 4)
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(self._process_single_chapter, chapter_text, chapter_num): chapter_num
+                    for chapter_num, chapter_text in chapters.items()
+                }
+                
+                results = {}
+                for future in as_completed(futures):
+                    chapter_num = futures[future]
+                    try:
+                        results[chapter_num] = future.result()
+                    except Exception as e:
+                        print(f"Ошибка при обработке главы {chapter_num}: {str(e)}")
+                
+                return results
+        except Exception as e:
+            print(f"Ошибка при параллельной обработке глав: {str(e)}")
+            return {}
+
+    def _process_single_chapter(self, chapter_text: str, chapter_num: int) -> str:
+        """Обработка одной главы"""
+        try:
+            # Здесь можно добавить дополнительную обработку главы
+            # Например, форматирование, анализ и т.д.
+            return chapter_text
+        except Exception as e:
+            print(f"Ошибка при обработке главы {chapter_num}: {str(e)}")
+            return ""
+
+    def process_metadata_parallel(self) -> Dict[str, any]:
+        """Параллельная обработка метаданных"""
+        try:
+            metadata_tasks = [
+                ('title', self.metadata_extractor.extract_title),
+                ('author', self.metadata_extractor.extract_author),
+                ('publisher', self.metadata_extractor.extract_publisher),
+                ('date', self.metadata_extractor.extract_date),
+                ('language', self.metadata_extractor.extract_language),
+                ('description', self.metadata_extractor.extract_description)
+            ]
+            
+            with ThreadPoolExecutor(max_workers=len(metadata_tasks)) as executor:
+                futures = {
+                    executor.submit(task[1]): task[0]
+                    for task in metadata_tasks
+                }
+                
+                results = {}
+                for future in as_completed(futures):
+                    field = futures[future]
+                    try:
+                        results[field] = future.result()
+                    except Exception as e:
+                        print(f"Ошибка при извлечении {field}: {str(e)}")
+                
+                return results
+        except Exception as e:
+            print(f"Ошибка при параллельной обработке метаданных: {str(e)}")
+            return {}
+
+    def add_to_my_library(self) -> str:
+        """Сохраняет обработанную книгу в директорию библиотеки."""
+        try:
+            # Генерируем путь для сохранения в библиотеке
+            book_name = os.path.basename(self.epub_path)
+            library_path = os.path.join(self.library_dir, book_name)
+            
+            # Копируем файл
+            shutil.copy2(self.epub_path, library_path)
+            
+            self.result.library_save_path = library_path
+            self.result.thread_statuses['add_to_my_library'] = "Книга успешно добавлена в библиотеку"
+            return library_path
+        except Exception as e:
+            self.result.thread_statuses['add_to_my_library'] = f"Ошибка при добавлении в библиотеку: {str(e)}"
+            raise
+
     def process_parallel(self) -> ProcessingResult:
         """Параллельная обработка EPUB файла"""
         start_time = time.time()
         operation_times = {}
-
+        
         # Извлекаем текст и сразу анализируем его
         text_start = time.time()
         text_result = self.extract_text()
         self.analyze_text(text_result)
         operation_times['extract_text'] = time.time() - text_start
-        operation_times['analyze_text'] = time.time() - text_start # Предполагаем, что анализ очень быстрый после извлечения текста
-
-        # Запускаем остальные операции параллельно.
+        
+        # Запускаем все операции параллельно
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {}
-
-            # Операции, которые могут выполняться параллельно после извлечения текста
+            
+            # Базовые операции
             base_operations = [
-                (lambda: process_metadata_parallel(self.metadata_extractor), 'extract_metadata'),
+                (self.extract_metadata, 'extract_metadata'),
                 (self.extract_images, 'extract_images'),
                 (lambda: self.search_keywords(text_result), 'search_keywords'),
                 (self.format_text, 'format_text'),
+                (self.generate_toc, 'generate_toc'),
                 (self.split_chapters, 'split_chapters'),
                 (self.process_styles, 'process_styles'),
-                (lambda: save_to_library(self.epub_path, self.library_dir, self.result), 'add_to_my_library'),
+                (self.add_to_my_library, 'add_to_my_library')
             ]
-
-            # Добавляем параллельную обработку глав в базовые операции
-            base_operations.append((lambda: process_chapters_parallel(text_result, self.chapter_splitter), 'process_chapters_parallel'))
-
-            # Определяем зависимые операции явно
-            generate_toc_task = (self.generate_toc, 'generate_toc')
-            translate_task = (lambda result: translate_first_chapter(self.epub_archive, self.opf_dir, result, self.result), 'translate_first_chapter')
-
-            # Запускаем все независимые операции
+            
+            # Запускаем все операции
             for operation, name in base_operations:
                 op_start = time.time()
                 future = executor.submit(operation)
                 futures[future] = (name, op_start)
-
-            # Запускаем зависимые операции
-            generate_toc_op, generate_toc_name = generate_toc_task
-            translate_op, translate_name = translate_task
-
-            generate_toc_future = executor.submit(generate_toc_op)
-            futures[generate_toc_future] = generate_toc_name, time.time()
-
-            try:
-                # Ожидаем результат генерации TOC
-                generate_toc_result = generate_toc_future.result()
-                # Если успешно, запускаем перевод
-                translate_future = executor.submit(translate_op, generate_toc_result)
-                futures[translate_future] = translate_name, time.time()
-            except Exception as e:
-                # Если generate_toc провалился, записываем ошибку и не запускаем перевод
-                print(f"Ошибка или пропуск зависимости generate_toc: {str(e)}")
-                self.result.thread_statuses[generate_toc_name] = f"Ошибка: {str(e)}"
-                # Также отмечаем ошибку для зависимой операции перевода
-                self.result.thread_statuses[translate_name] = f"Пропущено из-за ошибки зависимости {generate_toc_name}: {str(e)}"
-
-        # Собираем результаты и время выполнения по мере завершения всех запущенных задач
-        for future in as_completed(futures):
-            operation_name, op_start = futures[future]
-            try:
-                future.result()
-                # Проверяем, не было ли время уже записано (например, для analyze_text)
-                if operation_name not in operation_times:
+            
+            for future in as_completed(futures):
+                operation_name, op_start = futures[future]
+                try:
+                    future.result()
+                    # Правильно измеряем время выполнения каждой операции после её завершения
                     operation_times[operation_name] = time.time() - op_start
-            except Exception as e:
-                print(f"Ошибка при выполнении {operation_name}: {str(e)}")
-                if operation_name not in operation_times:
-                    operation_times[operation_name] = 0.0
+                except Exception as e:
+                    print(f"Ошибка при выполнении {operation_name}: {str(e)}")
+                    # Если произошла ошибка, можно установить время выполнения в 0 или другое значение
+                    operation_times[operation_name] = 0.0 # Или другое значение по умолчанию при ошибке
 
-        # Сохраняем собранные времена выполнения
+        # Сохраняем времена выполнения отдельных операций
         self.result.execution_times = operation_times
-
-        # Общее время - сумма времен выполнения всех операций, которые были запущены и успешно завершились
-        self.result.execution_times['total_operations_time_sum'] = sum(v for v in operation_times.values() if v > 0)
-
-        # Сохраняем общее время выполнения метода process_parallel (Wall time)
+        
+        # Общее время - сумма времен выполнения всех операций
+        self.result.execution_times['total_time'] = sum(operation_times.values())
+        
+        # Также сохраним общее время выполнения самого метода process_parallel (Wall time)
         self.result.execution_times['process_parallel_wall_time'] = time.time() - start_time
 
         return self.result
@@ -409,12 +430,7 @@ class EpubProcessor:
     def save_results(self, output_file: str = "output_report.json"):
         """Сохраняет результаты обработки в JSON файл"""
         result_dict = {
-            # Включаем обе метрики времени для ясности
-            "execution_times": {
-                 "process_parallel_wall_time": self.result.execution_times.get('process_parallel_wall_time', 0.0),
-                 "total_operations_time_sum": self.result.execution_times.get('total_operations_time_sum', 0.0),
-                 **{k: v for k, v in self.result.execution_times.items() if k not in ['process_parallel_wall_time', 'total_operations_time_sum']}
-            },
+            "execution_times": self.result.execution_times,
             "metadata": asdict(self.result.metadata) if self.result.metadata else None,
             "text_analysis": {
                 "word_count": self.result.text_analysis.word_count,
@@ -453,10 +469,9 @@ class EpubProcessor:
                 "processed_files": list(self.result.style_processing.processed_styles.keys())
             } if self.result.style_processing else None,
             "library_save_path": self.result.library_save_path,
-            "translated_first_chapter": self.result.translated_first_chapter,
             "thread_statuses": self.result.thread_statuses
         }
-
+        
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(result_dict, f, ensure_ascii=False, indent=2)
 
@@ -471,12 +486,12 @@ def main():
     # Слово для поиска (если указано)
     search_pattern = sys.argv[2] if len(sys.argv) > 2 else None
     
-    # Создаем процессор и запускаем обработку в контекстном менеджере
-    with EpubProcessor(epub_path, search_pattern) as processor:
-        result = processor.process_parallel()
-        
-        # Сохраняем результаты
-        processor.save_results()
+    # Создаем процессор и запускаем обработку
+    processor = EpubProcessor(epub_path, search_pattern)
+    result = processor.process_parallel()
+    
+    # Сохраняем результаты
+    processor.save_results()
 
 if __name__ == "__main__":
     main()
